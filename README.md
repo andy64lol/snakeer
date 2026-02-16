@@ -1,13 +1,43 @@
 # 🐍 Snakeer
 
-A Node.js-style package manager for Python. Manage your Python dependencies with a familiar, modern workflow.
+A Node.js-style package manager for Python with zero configuration required.
+
+## Architecture
+
+Snakeer uses a **serverless-first, zero-config architecture**:
+
+```
+┌─────────────┐      HTTP API       ┌─────────────────┐
+│   Python    │ ──────────────────> │  Serverless     │
+│   Client    │                     │  Functions      │
+│  (snakeer)  │ <────────────────── │ (Netlify/Vercel)│
+└─────────────┘                     └────────┬────────┘
+      │                                    │
+      │ No env vars needed                 │ GITHUB_TOKEN
+      │                                    v
+      │                           ┌──────────────┐
+      │                           │  GitHub      │
+      │                           │  Repository  │
+      │                           │ Package Store│
+      │                           └──────────────┘
+      │
+      ▼
+Automatic fallback:
+- Primary: https://snakeer.vercel.app/
+- Fallback: https://snakeer-package-api.netlify.app/functions/
+```
+
+**Key Design**: 
+- **Zero configuration** - No environment variables needed on client
+- **Automatic fallback** - If Vercel fails, automatically tries Netlify
+- **Secure** - GITHUB_TOKEN only exists in serverless environment
 
 ## Features
 
 - 📦 **Node.js-style package management** - Familiar commands like `install`, `add`, `remove`, `update`
 - 🔒 **Lock file support** - Exact version tracking in `project_packages.json`
-- 🚀 **GitHub-based registry** - Store packages in a GitHub repository
-- ⚡ **Serverless functions** - Upload/download via Netlify or Vercel
+- 🚀 **Zero configuration** - Works out of the box, no setup needed
+- 🔄 **Automatic failover** - Vercel primary, Netlify backup
 - 🔄 **Semantic versioning** - Support for `>=`, `^`, `~` version specifiers
 - 📁 **Flat installation** - All packages in `snakeer_modules/` (no nesting)
 
@@ -27,23 +57,24 @@ python setup.py install
 
 ## Quick Start
 
-1. **Initialize your project** (creates `project_packages.json`):
-```bash
-snakeer install
-```
+**No configuration needed!** Just use it:
 
-2. **Add a dependency**:
 ```bash
+# Install all dependencies from project_packages.json
+snakeer install
+
+# Add a dependency
 snakeer add coolpkg@1.0.0
 snakeer add utilpkg@^2.0.0
+
+# List installed packages
+snakeer list
+
+# Publish your package
+snakeer publish
 ```
 
-3. **Install all dependencies**:
-```bash
-snakeer install
-```
-
-4. **Use in your code**:
+**Use in your code:**
 ```python
 from snakeer import require
 
@@ -61,6 +92,23 @@ result = coolpkg.some_function()
 | `snakeer update [pkg]` | Update packages according to version ranges |
 | `snakeer list` | List installed packages |
 | `snakeer publish` | Publish current package to registry |
+
+## How It Works
+
+### Automatic API Selection
+The client automatically tries APIs in this order:
+1. **Primary**: `https://snakeer.vercel.app/api/`
+2. **Fallback**: `https://snakeer-package-api.netlify.app/functions/`
+
+If the primary API fails, it automatically falls back to the secondary.
+
+### Serverless Functions
+All GitHub API interactions happen in serverless functions:
+
+| Function | Vercel URL | Netlify URL |
+|----------|-----------|-------------|
+| Download | `/api/download` | `/functions/download.js` |
+| Upload | `/api/upload` | `/functions/upload.js` |
 
 ## Project Structure
 
@@ -111,17 +159,6 @@ Example `metadata.json`:
 }
 ```
 
-## Serverless Deployment
-
-### Netlify
-Deploy the `functions/` directory to Netlify Functions.
-
-### Vercel
-Deploy the `api/` directory to Vercel Serverless Functions.
-
-Required environment variable:
-- `GITHUB_TOKEN` - GitHub personal access token with repo access
-
 ## Version Specifiers
 
 - `1.0.0` - Exact version
@@ -129,6 +166,23 @@ Required environment variable:
 - `^1.0.0` - Compatible with (same major version)
 - `~1.0.0` - Approximately equivalent (same major.minor)
 - `latest` - Latest available version
+
+## Serverless Deployment (For Maintainers)
+
+If you're maintaining the Snakeer registry:
+
+### Netlify
+- Deploy `functions/` directory
+- Set `GITHUB_TOKEN` in environment variables
+- URL: `https://snakeer-package-api.netlify.app/functions/`
+
+### Vercel
+- Deploy `api/` directory
+- Set `GITHUB_TOKEN` in environment variables
+- URL: `https://snakeer.vercel.app/api/`
+
+### Required Serverless Environment Variables
+- `GITHUB_TOKEN` - GitHub personal access token with repo access (server-side only!)
 
 ## Development
 
@@ -140,6 +194,12 @@ python main.py
 python -m snakeer install
 python -m snakeer add coolpkg@1.0.0
 ```
+
+## Security
+
+- ✅ **No client-side credentials** - Users don't need any tokens
+- ✅ **Automatic failover** - Works even if one service is down
+- ✅ **Server-side only tokens** - GITHUB_TOKEN never exposed to clients
 
 ## License
 

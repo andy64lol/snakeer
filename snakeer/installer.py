@@ -1,6 +1,6 @@
 """
 Package installer for Snakeer
-Handles downloading, extracting, and installing packages from GitHub registry
+Handles downloading, extracting, and installing packages via serverless API
 """
 
 import os
@@ -20,79 +20,107 @@ from .utils import (
 
 
 class Installer:
-    """Handles package installation from GitHub registry"""
+    """Handles package installation via serverless API"""
     
-    GITHUB_API_BASE = "https://api.github.com"
-    REGISTRY_REPO = "andy64lol/snakeer_packages_lib"
+    # Primary: Vercel, Fallback: Netlify
+    VERCEL_API = "https://snakeer.vercel.app/api"
+    NETLIFY_API = "https://snakeer-package-api.netlify.app/.netlify/functions"
     
     def __init__(self, config: Config):
         self.config = config
         self.cache_dir = get_cache_path()
         self.modules_dir = get_modules_path()
-        self.github_token = os.environ.get("GITHUB_TOKEN", "")
+        self.current_api = self.VERCEL_API
         ensure_dir(self.cache_dir)
         ensure_dir(self.modules_dir)
     
-    def _get_headers(self) -> Dict[str, str]:
-        """Get headers for GitHub API requests"""
-        headers = {
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "Snakeer-Package-Manager"
-        }
-        if self.github_token:
-            headers["Authorization"] = f"token {self.github_token}"
-        return headers
+    def _try_apis(self, operation, *args, **kwargs):
+        """Try primary API, fallback to secondary if it fails"""
+        apis = [self.VERCEL_API, self.NETLIFY_API]
+        
+        for api in apis:
+            try:
+                result = operation(api, *args, **kwargs)
+                self.current_api = api
+                return result
+            except Exception as e:
+                if api == apis[-1]:  # Last API in list
+                    raise e
+                continue
+        
+        return None
     
-    def _get_registry_contents(self, path: str = "") -> List[Dict]:
-        """Get contents from GitHub repository"""
-        url = f"{self.GITHUB_API_BASE}/repos/{self.REGISTRY_REPO}/contents/{path}"
-        try:
-            response = requests.get(url, headers=self._get_headers(), timeout=30)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            print(f"Error accessing registry: {e}")
-            return []
+    def _get_download_url(self, api_base: str, package_name: str, version: Optional[str] = None) -> str:
+        """Get serverless download API URL"""
+        if "netlify" in api_base:
+            # Netlify uses /functions/filename.js
+            if version:
+                return f"{api_base}/download.js?package={package_name}&version={version}"
+            return f"{api_base}/download.js?package={package_name}"
+        else:
+            # Vercel uses /api/filename
+            if version:
+                return f"{api_base}/api/download?package={package_name}&version={version}"
+            return f"{api_base}/api/download?package={package_name}"
+    
+    def _get_upload_url(self, api_base: str) -> str:
+        """Get serverless upload API URL"""
+        if "netlify" in api_base:
+            return f"{api_base}/upload.js"
+        else:
+            return f"{api_base}/api/upload"
+    
+    def _fetch_package_info(self, api_base: str, package_name: str, version: Optional[str] = None):
+        """Fetch package info from serverless API"""
+        url = self._get_download_url(api_base, package_name, version)
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
     
     def _get_package_versions(self, package_name: str) -> List[str]:
-        """Get available versions for a package"""
-        contents = self._get_registry_contents(f"packages/{package_name}")
-        versions = []
-        for item in contents:
-            if item["type"] == "dir":
-                # Directory name is the version
-                versions.append(item["name"])
-        return versions
+        """Get available versions for a package via serverless API"""
+        try:
+            def fetch_versions(api_base, pkg_name):
+                data = self._fetch_package_info(api_base, pkg_name)
+                if "versions" in data:
+                    return data["versions"]
+                elif "version" in data:
+                    return [data["version"]]
+                return []
+            
+            return self._try_apis(fetch_versions, package_name) or []
+            
+        except Exception as e:
+            print(f"Error fetching versions for {package_name}: {e}")
+            return []
     
     def _download_package(self, package_name: str, version: str) -> Optional[str]:
         """
-        Download package from GitHub registry
+        Download package via serverless API
         Returns path to downloaded file or None if failed
         """
-        package_path = f"packages/{package_name}/{version}"
-        contents = self._get_registry_contents(package_path)
-        
-        # Look for package archive
-        archive_item = None
-        for item in contents:
-            if item["name"].endswith((".zip", ".tar.gz")):
-                archive_item = item
-                break
-        
-        if not archive_item:
-            print(f"No package archive found for {package_name}@{version}")
+        try:
+            def fetch_and_download(api_base, pkg_name, ver):
+                # Get package info from serverless API
+                data = self._fetch_package_info(api_base, pkg_name, ver)
+                
+                if "download_url" not in data:
+                    raise Exception(f"No download URL found for {pkg_name}@{ver}")
+                
+                download_url = data["download_url"]
+                archive_name = data.get("filename", f"{pkg_name}-{ver}.zip")
+                cache_file = os.path.join(self.cache_dir, f"{pkg_name}-{ver}-{archive_name}")
+                
+                print(f"Downloading {pkg_name}@{ver} from {api_base}...")
+                if download_file(download_url, cache_file):
+                    return cache_file
+                raise Exception("Download failed")
+            
+            return self._try_apis(fetch_and_download, package_name, version)
+            
+        except Exception as e:
+            print(f"Error downloading {package_name}@{version}: {e}")
             return None
-        
-        # Download the file
-        download_url = archive_item["download_url"]
-        archive_name = archive_item["name"]
-        cache_file = os.path.join(self.cache_dir, f"{package_name}-{version}-{archive_name}")
-        
-        print(f"Downloading {package_name}@{version}...")
-        if download_file(download_url, cache_file):
-            return cache_file
-        
-        return None
     
     def _extract_package(self, archive_path: str, package_name: str, version: str) -> bool:
         """Extract package archive to snakeer_modules"""
@@ -238,10 +266,10 @@ class Installer:
         for name, version_spec in dependencies.items():
             self.update_package(name)
     
-    def publish(self, registry_url: Optional[str] = None):
+    def publish(self, registry_url: Optional[str] = None) -> Optional[str]:
         """
-        Publish current package to registry
-        This creates a package archive and uploads it to GitHub
+        Publish current package to registry via serverless API
+        This creates a package archive and uploads it via serverless function
         """
         project_name = self.config.get_project_name()
         project_version = self.config.get_project_version()
@@ -269,7 +297,44 @@ class Installer:
                     zipf.write(file_path, arcname)
         
         print(f"Created package archive: {archive_path}")
-        print(f"To publish, manually upload to: https://github.com/{self.REGISTRY_REPO}/tree/main/packages/{project_name}/{project_version}")
-        print("Or use the serverless upload function with your GitHub token")
         
-        return archive_path
+        # Read and encode the archive
+        with open(archive_path, 'rb') as f:
+            file_content = f.read()
+            encoded_content = base64.b64encode(file_content).decode('utf-8')
+        
+        # Upload via serverless API
+        try:
+            def do_upload(api_base, pkg_name, ver, content, fname):
+                upload_url = self._get_upload_url(api_base)
+                payload = {
+                    "packageName": pkg_name,
+                    "version": ver,
+                    "content": content,
+                    "filename": fname
+                }
+                
+                response = requests.post(
+                    upload_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=60
+                )
+                response.raise_for_status()
+                return response.json()
+            
+            result = self._try_apis(do_upload, project_name, project_version, encoded_content, archive_name)
+            
+            if result and result.get("success"):
+                print(f"✅ Published {project_name}@{project_version}")
+                print(f"URL: {result.get('url', 'N/A')}")
+                return archive_path
+            else:
+                error_msg = result.get('error', 'Unknown error') if result else 'Upload failed'
+                print(f"❌ Publish failed: {error_msg}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Upload error: {e}")
+            print("Note: Both Vercel and Netlify APIs failed")
+            return None
